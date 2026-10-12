@@ -1,0 +1,234 @@
+//@version=6
+indicator("Cost Ladder: Does a Signal Survive 0x, 1x and 2x Costs?", shorttitle = "COST-LADDER", overlay = true, max_bars_back = 500)
+
+// Cost Ladder
+// 1) Reads one entry signal: a built-in demo cross or any plot from another indicator.
+// 2) Replays it through a shadow ledger: one position at a time, entry at the next open,
+//    exit by time or by an opposite signal. The gross return and the round-trip cost of
+//    every closed trade are stored separately.
+// 3) Re-prices the same trades at 0x, 1x and 2x of the costs and shows the mean net return
+//    per trade with a 95% confidence interval, plus the break-even round-trip cost.
+// The result is a table of counts and costs, not a trading rule.
+
+// ───────────────────────── Inputs ─────────────────────────
+sigMode = input.string("Built-in demo: EMA 9/21 cross", "Signal source", options = ["Built-in demo: EMA 9/21 cross", "External plot"], group = "Signal", tooltip = "Built-in demo: a long request when EMA 9 crosses above EMA 21, a short request when it crosses below. It is there only so the script works out of the box. External plot: use the plot chosen in the next input.")
+extSrc = input.source(close, "External plot", group = "Signal", tooltip = "Used when the signal source is External plot. Positive = long request, negative = short request, zero or na = no request. Pick a plot that does not repaint: the script cannot check that.")
+direction = input.string("Long and short", "Direction", options = ["Long and short", "Long only", "Short only"], group = "Signal", tooltip = "Which requests may open a position. An opposite request that is not allowed still closes an open position, but does not open a new one.")
+
+holdBars = input.int(10, "Time exit (bars)", minval = 1, maxval = 500, group = "Exit", tooltip = "A position is closed at the close of the Nth bar it is held, counting the entry bar as bar 1. An opposite request closes it earlier, at the next open.")
+
+commPct = input.float(0.05, "Commission per side (% of price)", minval = 0.0, step = 0.01, group = "Costs", tooltip = "Charged on each side, so the round trip pays it twice.")
+slipTicks = input.float(1.0, "Slippage per side (ticks)", minval = 0.0, step = 0.5, group = "Costs", tooltip = "Ticks charged against you on each side. The tick size is the symbol's minimum tick.")
+
+minN = input.int(30, "Minimum trades for a verdict", minval = 2, group = "Statistics", tooltip = "Below this many trades the verdict is 'too few'.")
+
+showMarks = input.bool(true, "Mark entries on the chart", group = "Display")
+tablePos = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = "Display")
+
+// ───────────────────────── Signal ─────────────────────────
+// Every ta.* call stays at global scope, so every bar evaluates it the same way.
+float fastE = ta.ema(close, 9)
+float slowE = ta.ema(close, 21)
+bool crossUp = ta.crossover(fastE, slowE)
+bool crossDn = ta.crossunder(fastE, slowE)
+int demoSig = crossUp ? 1 : crossDn ? -1 : 0
+int extSig = na(extSrc) ? 0 : extSrc > 0 ? 1 : extSrc < 0 ? -1 : 0
+
+// rawSig is what the source asks for. It is also what closes an open position on an opposite request.
+int rawSig = sigMode == "External plot" ? extSig : demoSig
+
+allowed(int d) =>
+    direction == "Long and short" or (direction == "Long only" and d == 1) or (direction == "Short only" and d == -1)
+
+// sig is the request that may open a position.
+int sig = (rawSig != 0 and allowed(rawSig)) ? rawSig : 0
+
+// ───────────────────────── Shadow ledger state ─────────────────────────
+// pos: 1 long, -1 short, 0 flat. pendingDir / pendingExit are decided on a closed bar and executed at the next open.
+var int pos = 0
+var float entryPx = na
+var int entryBar = na
+var int pendingDir = 0
+var bool pendingExit = false
+
+// One element per closed trade: the gross return, and the round-trip cost at 1x.
+var array<float> grossR = array.new<float>()
+var array<float> cost1 = array.new<float>()
+
+// Stores one closed trade. A function cannot assign to the global state above, but it can push to arrays.
+//   gross return   = direction * (exit / entry - 1)
+//   round-trip 1x  = 2 * commission + slippage ticks * tick size * (1 / entry + 1 / exit)
+recordTrade(array<float> g, array<float> c, int dir, float entryP, float exitP) =>
+    if not na(entryP) and not na(exitP) and entryP > 0 and exitP > 0
+        float r = dir * (exitP / entryP - 1.0)
+        float cst = 2.0 * commPct / 100.0 + slipTicks * syminfo.mintick * (1.0 / entryP + 1.0 / exitP)
+        array.push(g, r)
+        array.push(c, cst)
+
+// ───────────────────────── Ledger update ─────────────────────────
+// Only confirmed bars update the ledger, so a realtime bar never counts twice.
+// A position still open on the last bar is not counted.
+bool openedLong = false
+bool openedShort = false
+
+if barstate.isconfirmed
+    // 1) A pending exit closes at this bar's open.
+    if pendingExit and pos != 0
+        recordTrade(grossR, cost1, pos, entryPx, open)
+        pos := 0
+    pendingExit := false
+
+    // 2) A pending entry opens at this bar's open, if flat. It is cleared either way.
+    if pendingDir != 0 and pos == 0
+        pos := pendingDir
+        entryPx := open
+        entryBar := bar_index
+        if pos == 1
+            openedLong := true
+        else
+            openedShort := true
+    pendingDir := 0
+
+    // 3) Time exit at this bar's close. The entry bar counts as bar 1.
+    if pos != 0 and bar_index - entryBar + 1 >= holdBars
+        recordTrade(grossR, cost1, pos, entryPx, close)
+        pos := 0
+
+    // 4) Read this bar's request. It is executed at the next open.
+    if pos != 0 and rawSig == -pos
+        pendingExit := true
+        pendingDir := sig
+    else if pos == 0 and sig != 0
+        pendingDir := sig
+    else
+        pendingDir := 0
+
+// ───────────────────────── Plots ─────────────────────────
+// openedLong / openedShort are set only inside the confirmed-bar block, so a mark never disappears later.
+plotshape(showMarks and openedLong, "Long entry", shape.triangleup, location.belowbar, color.new(color.teal, 10), size = size.tiny, display = display.pane, text = "L", textcolor = color.teal)
+plotshape(showMarks and openedShort, "Short entry", shape.triangledown, location.abovebar, color.new(color.orange, 10), size = size.tiny, display = display.pane, text = "S", textcolor = color.orange)
+
+// ───────────────────────── Table ─────────────────────────
+tPos = switch tablePos
+    "Top right" => position.top_right
+    "Bottom right" => position.bottom_right
+    "Top left" => position.top_left
+    => position.bottom_left
+
+var table tbl = table.new(tPos, 7, 6, border_width = 1)
+
+cellBg = color.new(color.gray, 85)
+hdrBg = color.new(color.gray, 65)
+okBg = color.new(color.green, 70)
+badBg = color.new(color.red, 65)
+
+setCell(int col, int row, string txt, color bg = na, string align = text.align_center) =>
+    table.cell(tbl, col, row, txt, text_color = chart.fg_color, text_size = size.small, text_halign = align, bgcolor = na(bg) ? cellBg : bg)
+
+// Share as a plain percentage with one decimal.
+fmtPct(float v) =>
+    na(v) ? "n/a" : str.tostring(v * 100.0, "0.0") + "%"
+
+// Cost as a percentage with three decimals.
+fmtCost(float v) =>
+    na(v) ? "n/a" : str.tostring(v * 100.0, "0.000") + "%"
+
+// Return as a percentage with two decimals and an explicit sign (no percent sign).
+fmtSigned(float v) =>
+    string out = "n/a"
+    if not na(v)
+        float p = math.round(v * 100.0, 2)
+        out := (p >= 0 ? "+" : "-") + str.tostring(math.abs(p), "0.00")
+    out
+
+// Merged rows are merged once: merging cells that are already merged on every realtime tick is avoided.
+var bool merged = false
+
+if barstate.islast
+    setCell(0, 0, "Costs", hdrBg, text.align_left)
+    setCell(1, 0, "Round trip %", hdrBg)
+    setCell(2, 0, "Trades", hdrBg)
+    setCell(3, 0, "Mean net % [95% CI]", hdrBg)
+    setCell(4, 0, "Win rate", hdrBg)
+    setCell(5, 0, "Profit factor", hdrBg)
+    setCell(6, 0, "Verdict", hdrBg)
+
+    int nT = array.size(grossR)
+    float meanR = nT > 0 ? array.sum(grossR) / nT : na
+    float meanC1 = nT > 0 ? array.sum(cost1) / nT : na
+
+    // Row k re-prices the same trades with k times the round-trip cost: x = gross return - k * cost.
+    for k = 0 to 2
+        float sumX = 0.0
+        float winSum = 0.0
+        float lossSum = 0.0
+        float wins = 0.0
+        if nT > 0
+            for t = 0 to nT - 1
+                float x = array.get(grossR, t) - k * array.get(cost1, t)
+                sumX += x
+                if x > 0
+                    winSum += x
+                    wins += 1.0
+                else if x < 0
+                    lossSum += x
+
+        float meanX = nT > 0 ? sumX / nT : na
+
+        // Sample standard deviation, second pass around the mean.
+        float ssd = 0.0
+        if nT > 1
+            for t = 0 to nT - 1
+                float dev = array.get(grossR, t) - k * array.get(cost1, t) - meanX
+                ssd += dev * dev
+        float sd = nT > 1 ? math.sqrt(ssd / (nT - 1)) : na
+        float ci = nT > 1 ? 1.96 * sd / math.sqrt(nT) : na
+
+        float winRate = nT > 0 ? wins / nT : na
+        float pf = lossSum < 0 ? winSum / math.abs(lossSum) : na
+        float rt = nT > 0 ? k * meanC1 : na
+
+        string verdict = "too few"
+        color verdictBg = na
+        if nT >= minN
+            if meanX - ci > 0
+                verdict := "positive"
+                verdictBg := okBg
+            else if meanX + ci < 0
+                verdict := "negative"
+                verdictBg := badBg
+            else
+                verdict := "not distinguishable from zero"
+
+        string meanTxt = na(ci) ? fmtSigned(meanX) : fmtSigned(meanX) + " [" + fmtSigned(meanX - ci) + ", " + fmtSigned(meanX + ci) + "]"
+        string pfTxt = na(pf) ? (winSum > 0 ? "inf" : "n/a") : str.tostring(pf, "0.00")
+        string lbl = k == 0 ? "0x (none)" : k == 1 ? "1x (yours)" : "2x"
+
+        setCell(0, k + 1, lbl, na, text.align_left)
+        setCell(1, k + 1, fmtCost(rt))
+        setCell(2, k + 1, str.tostring(nT))
+        setCell(3, k + 1, meanTxt)
+        setCell(4, k + 1, fmtPct(winRate))
+        setCell(5, k + 1, pfTxt)
+        setCell(6, k + 1, verdict, verdictBg)
+
+    // Break-even round trip: the cost per trade at which the mean net return is zero, which is the mean gross return.
+    string beTxt = "n/a"
+    if nT > 0
+        if meanR <= 0
+            beTxt := "negative before costs"
+        else
+            beTxt := fmtSigned(meanR) + "%"
+            if meanC1 > 0
+                beTxt := beTxt + " (" + str.tostring(meanR / meanC1, "0.0") + "x your costs)"
+
+    string sigTxt = sigMode == "External plot" ? "external plot" : "demo EMA 9/21 cross"
+    setCell(0, 4, "Break-even round trip: " + beTxt + " · signal: " + sigTxt + " · exit: " + str.tostring(holdBars) + " bars or opposite signal · " + direction, hdrBg, text.align_left)
+    setCell(0, 5, "Shadow ledger, one position at a time, entries at the next open. Not the Strategy Tester. Counts, not advice.", hdrBg, text.align_left)
+    for c = 1 to 6
+        setCell(c, 4, "", hdrBg)
+        setCell(c, 5, "", hdrBg)
+    if not merged
+        table.merge_cells(tbl, 0, 4, 6, 4)
+        table.merge_cells(tbl, 0, 5, 6, 5)
+        merged := true
