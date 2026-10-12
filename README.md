@@ -2,7 +2,7 @@
 
 Open-source TradingView indicator (Pine Script v6) that replays one entry signal through a shadow ledger and re-prices the same trades at 0x, 1x and 2x of your trading costs, so you can see whether the signal still shows an edge once costs are in.
 
-Published on TradingView: not yet. The link will be added here after publishing.
+Published on TradingView: https://www.tradingview.com/script/kQRPTxtz-Cost-Ladder-Does-a-Signal-Survive-0x-1x-and-2x-Costs/
 
 ## What it measures
 
@@ -87,7 +87,15 @@ Two footer rows follow. The first gives the break-even round trip (with the mult
 5. Add a cost: each row's mean net return must equal the 0x mean minus that row's "Round trip %", up to rounding.
 6. To check for look-ahead, use Bar Replay: start a few hundred bars back and step forward. Marks must not disappear once a bar has closed, and `Trades` should only change when a bar closes.
 
-No results from a real chart are published here. Run it and read your own numbers.
+Result on 12 Oct 2026, BTCUSDT (Binance) 1 hour, default settings (demo EMA 9/21 cross, long and short, 10-bar time exit, 0.05% commission and 1 tick per side), 1,090 trades. Mean net return per trade in %, 95% CI in brackets:
+
+| Costs | Round trip % | Mean net % [95% CI] | Win rate | Profit factor | Verdict |
+|---|---|---|---|---|---|
+| 0x | 0.000 | +0.02 [-0.06, +0.10] | 42.0% | 1.04 | not distinguishable from zero |
+| 1x | 0.100 | -0.08 [-0.16, +0.00] | 39.4% | 0.85 | not distinguishable from zero |
+| 2x | 0.200 | -0.18 [-0.26, -0.10] | 35.6% | 0.71 | negative |
+
+Break-even round trip: +0.02%, about 0.2x these costs. On SPY daily with the same settings (367 trades) the demo is already negative before costs. These are results for one demo signal, not a statement about any strategy. Run it on your own signal and read your own numbers.
 
 ## Limitations
 
