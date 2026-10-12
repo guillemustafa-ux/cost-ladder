@@ -8,7 +8,7 @@ Cost Ladder replays one entry signal through a shadow ledger and re-prices the s
 The signal is a built-in demo (an EMA 9/21 cross) or any plot from another indicator, chosen in the "External plot" input.
 
 WHAT IS ORIGINAL HERE
-Most backtests report one number under one cost assumption. This script stores the gross return and the round-trip cost of every trade separately, then subtracts that cost multiplied by 0, 1 and 2. All three rows come from the same trades, so only the cost changes from row to row. That shows how fast an edge erodes as costs grow, and whether the interval around the mean still clears zero. The break-even round trip is one threshold to compare with the costs you expect to pay.
+A single backtest gives one result under one cost assumption. This script stores the gross return and the round-trip cost of every trade separately, then subtracts that cost multiplied by 0, 1 and 2. All three rows come from the same trades, so only the cost changes from row to row. That shows how fast an edge erodes as costs grow, and whether the interval around the mean still clears zero. The break-even round trip is one threshold to compare with the costs you expect to pay.
 The ledger keeps its own state and does not use the Strategy Tester, so it can score any signal written as a plot.
 
 LEDGER RULES
@@ -47,7 +47,7 @@ The demo is a placeholder, not a recommendation, and its first few bars can carr
 An external signal that stays on after a time exit opens a new trade at the next open. An external plot must not repaint; the script cannot check that.
 The script reports counts and statistics, not a trading rule, and it is not financial advice.
 
-The chart shows [SYMBOL] on the [TF] timeframe with the default settings. The table is in the bottom right, and the triangles mark the entries of the demo signal.
+The chart shows BTCUSDT (Binance) on the 1 hour timeframe with the default settings. The table is in the bottom right, and the triangles mark the entries of the demo signal.
 ---
 
 ## Publishing checklist
